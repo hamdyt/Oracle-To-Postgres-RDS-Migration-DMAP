@@ -1,0 +1,135 @@
+AWSTemplateFormatVersion: '2021-09-14'
+Description: Deploy DMAP on AWS Fargate, hosted in two public subnets and accessible via a public load balancer.
+Parameters:
+  DMAPStack:
+    Type: String
+    Description: DMAP Stack.
+  DMAPService:
+    Type: String
+    Description: DMAP Prod Version.
+  HealthCheckPath:
+    Type: String
+    Default: /health
+    Description: Path to perform the healthcheck on each instance.
+  HealthCheckIntervalSeconds:
+    Type: Number
+    Default: 5
+    Description: Number of seconds to wait between each health check.
+  ImageUrl:
+    Type: String
+    Description: The url of DMAP image that will handle incoming traffic.
+  ContainerPort:
+    Type: Number
+    Default: 80
+    Description: The port number DMAP is binding to.
+  ContainerCpu:
+    Type: Number
+    Default: 256
+    Description: CPU alloc.
+  ContainerMemory:
+    Type: Number
+    Default: 1024
+    Description: Memory in megabytes .
+  Path:
+    Type: String
+    Default: "*"
+    Description: Load balancer path.
+  DesiredCount:
+    Type: Number
+    Default: 2
+    Description: Copies of DMAP to run.
+
+Resources:
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: !Ref 'HealthCheckIntervalSeconds'
+      HealthCheckPath: !Ref 'HealthCheckPath'
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetType: ip
+      Name: !Ref 'DMAPService'
+      Port: !Ref 'ContainerPort'
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId:
+        Fn::ImportValue:
+          !Join [':', [!Ref 'DMAPStack', 'VPCId']]
+
+  LoadBalancerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref 'TargetGroup'
+          Type: 'forward'
+      Conditions:
+        - Field: path-pattern
+          Values: [!Ref 'Path']
+      ListenerArn:
+        Fn::ImportValue:
+          !Join [':', [!Ref 'DMAPStack', 'PublicListener']]
+      Priority: 1
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref 'DMAPService'
+      RetentionInDays: 1
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref 'DMAPService'
+      Cpu: !Ref 'ContainerCpu'
+      Memory: !Ref 'ContainerMemory'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn:
+        Fn::ImportValue:
+          !Join [':', [!Ref 'DMAPStack', 'ECSTaskExecutionRole']]
+      ContainerDefinitions:
+        - Name: !Ref 'DMAPService'
+          Cpu: !Ref 'ContainerCpu'
+          Memory: !Ref 'ContainerMemory'
+          Image: !Ref 'ImageUrl'
+          PortMappings:
+            - ContainerPort: !Ref 'ContainerPort'
+          LogConfiguration:
+            LogDriver: 'awslogs'
+            Options:
+              awslogs-group: !Ref 'DMAPService'
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: !Ref 'DMAPService'
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: LoadBalancerRule
+    Properties:
+      DMAPService: !Ref 'DMAPService'
+      Cluster:
+        Fn::ImportValue:
+          !Join [':', [!Ref 'DMAPStack', 'DMAPCluster']]
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+      DesiredCount: !Ref 'DesiredCount'
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - Fn::ImportValue:
+                !Join [':', [!Ref 'DMAPStack', 'ECSSecurityGroup']]
+          Subnets:
+            - Fn::ImportValue:
+                !Join [':', [!Ref 'DMAPStack', 'PublicSubnetOne']]
+            - Fn::ImportValue:
+                !Join [':', [!Ref 'DMAPStack', 'PublicSubnetTwo']]
+      TaskDefinition: !Ref 'TaskDefinition'
+      LoadBalancers:
+        - ContainerName: !Ref 'DMAPService'
+          ContainerPort: !Ref 'ContainerPort'
+          TargetGroupArn: !Ref 'TargetGroup'
